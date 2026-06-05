@@ -170,8 +170,9 @@ function ImportModal({ open, onClose }) {
     if (!preview.length) return toast('Nothing to import — check your format', 'error')
     setBusy(true)
     try {
-      await addTargets(preview)
-      toast(`Imported ${preview.length} target${preview.length > 1 ? 's' : ''}`)
+      const { inserted, skipped } = await addTargets(preview)
+      const dupPart = skipped > 0 ? `, skipped ${skipped} duplicate${skipped === 1 ? '' : 's'}` : ''
+      toast(`Imported ${inserted} new${dupPart}`, inserted > 0 ? 'success' : 'info')
       setText('')
       onClose()
     } catch (e) {

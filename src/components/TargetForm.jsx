@@ -7,6 +7,7 @@ import { Button, Field, Input, Textarea, Select } from './ui.jsx'
 import { useData } from '../context/DataContext.jsx'
 import { useToast } from '../context/ToastContext.jsx'
 import { CHANNELS, PRIORITIES, DAYS, STAGES } from '../lib/constants.js'
+import { addDays, toDayKey } from '../lib/date.js'
 
 const BLANK = {
   name: '', email: '', department: '', lab: '', research_area: '', hook: '',
@@ -15,7 +16,7 @@ const BLANK = {
 }
 
 export default function TargetForm({ open, onClose, target = null }) {
-  const { addTarget, updateTarget } = useData()
+  const { addTarget, updateTarget, settings } = useData()
   const toast = useToast()
   const editing = Boolean(target)
   const [form, setForm] = useState(() => ({ ...BLANK, ...stripNulls(target) }))
@@ -34,7 +35,20 @@ export default function TargetForm({ open, onClose, target = null }) {
     if (!form.name.trim()) return toast('Give your target a name', 'error')
     setBusy(true)
     try {
-      const payload = { ...form, followup_days: Number(form.followup_days) || 5, scheduled_day: form.scheduled_day || null }
+      // followup_days: always a positive integer (fall back to the global default).
+      const parsed = parseInt(form.followup_days, 10)
+      const followup_days = Number.isFinite(parsed) && parsed > 0 ? parsed : settings.followup_days || 5
+      // Only (re)compute the follow-up date when there's a contact date to base it on;
+      // with no contact date it stays null (Postgres rejects '' for date columns).
+      const base = form.last_contact_date || null
+      const next_followup_date = base ? addDays(toDayKey(base), followup_days) : null
+
+      const payload = {
+        ...form,
+        followup_days,
+        scheduled_day: form.scheduled_day || null,
+        next_followup_date,
+      }
       if (editing) {
         await updateTarget(target.id, payload)
         toast('Target updated')

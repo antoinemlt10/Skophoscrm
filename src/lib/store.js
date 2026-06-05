@@ -20,6 +20,19 @@ const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-$
 const now = () => new Date().toISOString()
 const withMeta = (r) => ({ id: uid(), created_at: now(), updated_at: now(), ...r })
 
+// Date/timestamptz columns. Postgres rejects '' for these, so every write path
+// coerces empty strings (and undefined) to null. Done centrally so no caller —
+// the edit form, imports, bulk actions — can ever send a bad value again.
+const DATE_COLUMNS = ['last_contact_date', 'next_followup_date', 'responded_at', 'activity_date']
+function normalizeDates(row) {
+  if (!row || typeof row !== 'object') return row
+  const out = { ...row }
+  for (const k of DATE_COLUMNS) {
+    if (k in out && (out[k] === '' || out[k] === undefined)) out[k] = null
+  }
+  return out
+}
+
 export const DEFAULT_SETTINGS = {
   daily_quota: 5,
   followup_days: 5,
@@ -127,22 +140,23 @@ const localBackend = {
   },
 
   async insert(table, row) {
-    const record = withMeta(row)
+    const record = withMeta(normalizeDates(row))
     lsSet(table, [record, ...lsGet(table, [])])
     return record
   },
 
   async insertMany(table, newRows) {
-    const records = newRows.map(withMeta)
+    const records = newRows.map((r) => withMeta(normalizeDates(r)))
     lsSet(table, [...records, ...lsGet(table, [])])
     return records
   },
 
   async update(table, id, patch) {
+    const clean = normalizeDates(patch)
     let updated = null
     const next = lsGet(table, []).map((r) => {
       if (r.id === id) {
-        updated = { ...r, ...patch, updated_at: now() }
+        updated = { ...r, ...clean, updated_at: now() }
         return updated
       }
       return r
@@ -236,19 +250,19 @@ const supaBackend = {
   },
 
   async insert(table, row) {
-    const { data, error } = await supabase.from(table).insert(row).select().single()
+    const { data, error } = await supabase.from(table).insert(normalizeDates(row)).select().single()
     if (error) throw error
     return data
   },
 
   async insertMany(table, rows) {
-    const { data, error } = await supabase.from(table).insert(rows).select()
+    const { data, error } = await supabase.from(table).insert(rows.map(normalizeDates)).select()
     if (error) throw error
     return data
   },
 
   async update(table, id, patch) {
-    const { data, error } = await supabase.from(table).update(patch).eq('id', id).select().single()
+    const { data, error } = await supabase.from(table).update(normalizeDates(patch)).eq('id', id).select().single()
     if (error) throw error
     return data
   },

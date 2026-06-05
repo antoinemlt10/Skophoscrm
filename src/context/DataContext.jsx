@@ -100,11 +100,37 @@ export function DataProvider({ children }) {
     return row
   }, [])
 
-  const addTargets = useCallback(async (list) => {
-    const rows = await store.insertMany('targets', list.map(sanitizeTarget))
-    setData((d) => ({ ...d, targets: [...rows, ...d.targets] }))
-    return rows
-  }, [])
+  // Bulk import with de-duplication. A row is a duplicate of an existing target
+  // (or of an earlier row in the same batch) by email when present, else by
+  // name + lab. Duplicates are skipped; returns { inserted, skipped }.
+  const addTargets = useCallback(
+    async (list) => {
+      const seen = new Set(data.targets.map(dedupKey).filter(Boolean))
+      const toInsert = []
+      let skipped = 0
+      for (const raw of list) {
+        const t = sanitizeTarget(raw)
+        if (!t.name) {
+          skipped++
+          continue
+        }
+        const k = dedupKey(t)
+        if (k && seen.has(k)) {
+          skipped++
+          continue
+        }
+        if (k) seen.add(k) // also collapses duplicates within the pasted file
+        toInsert.push(t)
+      }
+      let rows = []
+      if (toInsert.length) {
+        rows = await store.insertMany('targets', toInsert)
+        setData((d) => ({ ...d, targets: [...rows, ...d.targets] }))
+      }
+      return { inserted: rows.length, skipped }
+    },
+    [data.targets]
+  )
 
   const updateTarget = useCallback(async (id, patch) => {
     const row = await store.update('targets', id, patch)
@@ -327,6 +353,17 @@ export function DataProvider({ children }) {
 const STAGE_ORDER = ['Prospect', 'Contacted', 'Responded', 'Demo Scheduled', 'Onboarded', 'Lost']
 function maxStage(a, b) {
   return STAGE_ORDER.indexOf(a) >= STAGE_ORDER.indexOf(b) ? a : b
+}
+
+// Identity key for de-duplication: email (case-insensitive, trimmed) when present,
+// otherwise name + lab (name alone if lab is empty). Returns null if no name/email.
+function dedupKey(t) {
+  const email = (t.email || '').trim().toLowerCase()
+  if (email) return `e:${email}`
+  const name = (t.name || '').trim().toLowerCase()
+  if (!name) return null
+  const lab = (t.lab || '').trim().toLowerCase()
+  return `n:${name}|${lab}`
 }
 
 // Whitelist the fields we persist on a target (drops stray keys from imports/forms).
