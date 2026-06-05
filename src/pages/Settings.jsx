@@ -1,16 +1,26 @@
 // ============================================================
 // SETTINGS — tune the engine: daily goal, follow-up window, pivot
-// thresholds. Plus full data export and a reset.
+// thresholds. Plus full data export, reset-to-sample, and a hard wipe.
 // ============================================================
 import { useState } from 'react'
-import { Database, HardDrive, Download, RotateCcw, Save } from 'lucide-react'
+import { Database, HardDrive, Download, RotateCcw, Save, Trash2, AlertTriangle } from 'lucide-react'
 import { useData } from '../context/DataContext.jsx'
 import { useToast } from '../context/ToastContext.jsx'
 import { Button, Field, Input, SectionTitle, Badge } from '../components/ui.jsx'
+import Modal from '../components/Modal.jsx'
 import { toCSV, downloadFile } from '../lib/csv.js'
 
+// Show the actual Supabase project host so it's obvious where data lives.
+const SUPABASE_HOST = (() => {
+  try {
+    return import.meta.env.VITE_SUPABASE_URL ? new URL(import.meta.env.VITE_SUPABASE_URL).host : ''
+  } catch {
+    return ''
+  }
+})()
+
 export default function Settings() {
-  const { settings, updateSettings, mode, targets, learnings, template_notes, clearAllData } = useData()
+  const { settings, updateSettings, mode, targets, learnings, template_notes, resetToSampleData, eraseAllData } = useData()
   const toast = useToast()
   const [form, setForm] = useState({
     daily_quota: settings.daily_quota,
@@ -20,6 +30,8 @@ export default function Settings() {
     pivot_check_interval: settings.pivot_check_interval,
   })
   const [busy, setBusy] = useState(false)
+  const [wipeOpen, setWipeOpen] = useState(false)
+  const [confirmText, setConfirmText] = useState('')
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }))
 
@@ -70,13 +82,28 @@ export default function Settings() {
   }
 
   const reset = async () => {
-    if (!window.confirm('Erase ALL data and reload the 10 sample targets? This cannot be undone.')) return
+    if (!window.confirm('Replace everything with the 10 sample targets? Your current data will be deleted.')) return
     setBusy(true)
     try {
-      await clearAllData()
+      await resetToSampleData()
       toast('Reset to sample data')
     } catch (e) {
       toast(e.message || 'Reset failed', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const wipe = async () => {
+    if (confirmText !== 'DELETE') return
+    setBusy(true)
+    try {
+      await eraseAllData()
+      setWipeOpen(false)
+      setConfirmText('')
+      toast('All data deleted — starting empty')
+    } catch (e) {
+      toast(e.message || 'Delete failed', 'error')
     } finally {
       setBusy(false)
     }
@@ -91,7 +118,11 @@ export default function Settings() {
         {mode === 'supabase' ? <Database size={20} className="text-success" /> : <HardDrive size={20} className="text-info" />}
         <div className="flex-1">
           <p className="text-sm font-medium text-primary">Storage: {mode === 'supabase' ? 'Supabase (cloud)' : 'Local browser'}</p>
-          <p className="text-xs text-muted">{mode === 'supabase' ? 'Synced and private to your account, available on any device.' : 'Saved only in this browser. Add Supabase keys to sync across devices.'}</p>
+          <p className="text-xs text-muted">
+            {mode === 'supabase'
+              ? `Synced to ${SUPABASE_HOST || 'your Supabase project'} — private to your account, on any device.`
+              : 'Saved only in this browser. Add Supabase keys to sync across devices.'}
+          </p>
         </div>
         <Badge tone={mode === 'supabase' ? 'success' : 'info'}>{mode === 'supabase' ? 'Cloud' : 'Local'}</Badge>
       </div>
@@ -139,9 +170,57 @@ export default function Settings() {
         <p className="text-sm text-secondary">Export everything as CSV — targets, responses, learnings, and message iterations. You're never locked in.</p>
         <div className="flex flex-wrap gap-2">
           <Button variant="secondary" onClick={exportAll}><Download size={16} /> Export all data</Button>
-          <Button variant="danger" onClick={reset} disabled={busy}><RotateCcw size={16} /> Reset to sample data</Button>
+          <Button variant="secondary" onClick={reset} disabled={busy}><RotateCcw size={16} /> Reset to sample data</Button>
         </div>
       </div>
+
+      {/* danger zone */}
+      <div className="card space-y-3 border-danger/30">
+        <h3 className="flex items-center gap-2 font-display text-sm font-semibold text-danger"><AlertTriangle size={15} /> Danger zone</h3>
+        <p className="text-sm text-secondary">
+          Permanently delete every contact, activity, response, note and learning {mode === 'supabase' ? 'from Supabase' : 'from this browser'}.
+          Nothing is re-seeded — you start from a blank pipeline. This cannot be undone.
+        </p>
+        <div>
+          <Button variant="danger" onClick={() => { setConfirmText(''); setWipeOpen(true) }} disabled={busy}>
+            <Trash2 size={16} /> Delete all data — start empty
+          </Button>
+        </div>
+      </div>
+
+      {/* type-to-confirm wipe modal */}
+      <Modal
+        open={wipeOpen}
+        onClose={() => setWipeOpen(false)}
+        title="Delete all data?"
+        size="sm"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setWipeOpen(false)}>Cancel</Button>
+            <Button variant="danger" onClick={wipe} disabled={busy || confirmText !== 'DELETE'}>
+              <Trash2 size={16} /> Delete everything
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-secondary">
+            This will erase <span className="font-semibold text-primary">all {targets.length} contacts</span> and every related record
+            {mode === 'supabase' ? ' from your Supabase project' : ' from this browser'}. The app will be empty afterwards — no sample data
+            is brought back. <span className="font-semibold text-danger">This cannot be undone.</span>
+          </p>
+          <Field label='Type DELETE to confirm'>
+            <Input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              placeholder="DELETE"
+              autoFocus
+              autoComplete="off"
+              onKeyDown={(e) => e.key === 'Enter' && wipe()}
+            />
+          </Field>
+        </div>
+      </Modal>
     </div>
   )
 }

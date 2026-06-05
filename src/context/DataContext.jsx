@@ -5,7 +5,7 @@
 // UI never touches the storage layer directly.
 // ============================================================
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import { store, DEFAULT_SETTINGS } from '../lib/store.js'
+import { store, usingSupabase, purgeLocalCache, DEFAULT_SETTINGS } from '../lib/store.js'
 import { todayKey, addDays } from '../lib/date.js'
 import { WIN_RESPONSE } from '../lib/constants.js'
 import {
@@ -30,6 +30,9 @@ let bootPromise = null
 function boot() {
   if (!bootPromise) {
     bootPromise = (async () => {
+      // In Supabase mode, drop any leftover localStorage data cache from a prior
+      // local-only session so it can never shadow the real source of truth.
+      if (usingSupabase) purgeLocalCache()
       await store.ensureSeed()
       return store.loadAll()
     })()
@@ -255,10 +258,16 @@ export function DataProvider({ children }) {
 
   const markFirstWinCelebrated = useCallback(() => updateSettings({ first_win_celebrated: true }), [updateSettings])
 
-  const clearAllData = useCallback(async () => {
-    await store.clearAll()
-    setData({ ...EMPTY })
-    await store.ensureSeed()
+  // Wipe everything, then re-inject the 10 sample researchers.
+  const resetToSampleData = useCallback(async () => {
+    await store.resetToSample()
+    await refresh()
+  }, [refresh])
+
+  // Wipe everything to a genuinely empty pipeline — NO sample data re-injected.
+  const eraseAllData = useCallback(async () => {
+    setData({ ...EMPTY }) // reflect empty immediately
+    await store.wipeAll()
     await refresh()
   }, [refresh])
 
@@ -305,7 +314,8 @@ export function DataProvider({ children }) {
     // settings
     updateSettings,
     markFirstWinCelebrated,
-    clearAllData,
+    resetToSampleData,
+    eraseAllData,
     // derived
     ...derived,
   }

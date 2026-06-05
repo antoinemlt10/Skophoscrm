@@ -6,12 +6,19 @@
 //
 // Every method returns a Promise so the rest of the app never cares which
 // backend is live. The shapes returned are identical in both modes.
+//
+// SEEDING RULE (important): sample data is injected exactly ONCE per account,
+// on first ever load. We track "initialized" by a persistent marker — the
+// existence of a settings row (Supabase) or a 'seeded' flag (local) — NOT by
+// "is the targets table empty". That distinction is what lets you clear the app
+// to a genuinely empty state without it re-seeding itself on the next refresh.
 // ============================================================
 import { supabase, isSupabaseConfigured } from './supabase.js'
 import { buildSeedTargets, buildSeedTemplates } from './seed.js'
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.round(performance.now())}`)
 const now = () => new Date().toISOString()
+const withMeta = (r) => ({ id: uid(), created_at: now(), updated_at: now(), ...r })
 
 export const DEFAULT_SETTINGS = {
   daily_quota: 5,
@@ -24,12 +31,15 @@ export const DEFAULT_SETTINGS = {
 
 // The tables we round-trip, in dependency order.
 const TABLES = ['targets', 'templates', 'template_notes', 'transitions', 'activity', 'learnings']
+const ZERO_UUID = '00000000-0000-0000-0000-000000000000'
 
 /* ============================================================
-   localStorage backend
+   localStorage helpers
    ============================================================ */
 const LS_PREFIX = 'skophos.'
 const lsKey = (t) => LS_PREFIX + t
+// Device-local UX state that is NOT account data — keep it across data purges.
+const UX_KEYS = new Set([lsKey('gate'), lsKey('pivotSeen'), lsKey('baselineDismissedAt')])
 
 function lsGet(table, fallback = []) {
   try {
@@ -44,6 +54,32 @@ function lsSet(table, value) {
   return value
 }
 
+/**
+ * Remove our localStorage DATA keys (targets/templates/.../settings/seeded).
+ * Used on boot in Supabase mode so a leftover local cache from a previous
+ * localStorage-only session can never shadow the real Supabase data.
+ */
+export function purgeLocalCache() {
+  for (const t of [...TABLES, 'settings', 'seeded']) localStorage.removeItem(lsKey(t))
+}
+
+/** Wipe every skophos.* key except device-local UX state. */
+function purgeAllLocal() {
+  try {
+    const keys = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(LS_PREFIX) && !UX_KEYS.has(k)) keys.push(k)
+    }
+    keys.forEach((k) => localStorage.removeItem(k))
+  } catch {
+    /* ignore */
+  }
+}
+
+/* ============================================================
+   localStorage backend
+   ============================================================ */
 const localBackend = {
   mode: 'local',
 
@@ -54,37 +90,57 @@ const localBackend = {
     return data
   },
 
+  // Seed only if this device has never been initialized.
   async ensureSeed() {
-    if (lsGet('targets', []).length === 0 && !localStorage.getItem(lsKey('seeded'))) {
-      const targets = buildSeedTargets().map((t) => ({ id: uid(), created_at: now(), updated_at: now(), ...t }))
-      const templates = buildSeedTemplates().map((t) => ({ id: uid(), created_at: now(), updated_at: now(), ...t }))
-      lsSet('targets', targets)
-      lsSet('templates', templates)
-      lsSet('settings', { ...DEFAULT_SETTINGS })
-      localStorage.setItem(lsKey('seeded'), '1')
-      return true
-    }
-    return false
+    if (localStorage.getItem(lsKey('seeded'))) return false
+    this._seedFresh()
+    return true
+  },
+
+  _seedFresh() {
+    lsSet('targets', buildSeedTargets().map(withMeta))
+    lsSet('templates', buildSeedTemplates().map(withMeta))
+    lsSet('settings', { ...DEFAULT_SETTINGS })
+    localStorage.setItem(lsKey('seeded'), '1')
+  },
+
+  // Wipe everything and re-inject the 10 sample researchers.
+  async resetToSample() {
+    purgeAllLocal()
+    this._seedFresh()
+    return true
+  },
+
+  // Wipe everything to a genuinely empty pipeline (no sample contacts).
+  // The two message templates are app scaffolding, so they're recreated.
+  async wipeAll() {
+    purgeAllLocal()
+    lsSet('targets', [])
+    lsSet('template_notes', [])
+    lsSet('transitions', [])
+    lsSet('activity', [])
+    lsSet('learnings', [])
+    lsSet('templates', buildSeedTemplates().map(withMeta))
+    lsSet('settings', { ...DEFAULT_SETTINGS })
+    localStorage.setItem(lsKey('seeded'), '1') // mark initialized so boot won't reseed
+    return true
   },
 
   async insert(table, row) {
-    const rows = lsGet(table, [])
-    const record = { id: uid(), created_at: now(), updated_at: now(), ...row }
-    lsSet(table, [record, ...rows])
+    const record = withMeta(row)
+    lsSet(table, [record, ...lsGet(table, [])])
     return record
   },
 
   async insertMany(table, newRows) {
-    const rows = lsGet(table, [])
-    const records = newRows.map((r) => ({ id: uid(), created_at: now(), updated_at: now(), ...r }))
-    lsSet(table, [...records, ...rows])
+    const records = newRows.map(withMeta)
+    lsSet(table, [...records, ...lsGet(table, [])])
     return records
   },
 
   async update(table, id, patch) {
-    const rows = lsGet(table, [])
     let updated = null
-    const next = rows.map((r) => {
+    const next = lsGet(table, []).map((r) => {
       if (r.id === id) {
         updated = { ...r, ...patch, updated_at: now() }
         return updated
@@ -102,13 +158,7 @@ const localBackend = {
 
   async upsertSettings(patch) {
     const current = lsGet('settings', null) || { ...DEFAULT_SETTINGS }
-    const next = { ...current, ...patch, updated_at: now() }
-    return lsSet('settings', next)
-  },
-
-  async clearAll() {
-    for (const t of [...TABLES, 'settings', 'seeded']) localStorage.removeItem(lsKey(t))
-    return true
+    return lsSet('settings', { ...current, ...patch, updated_at: now() })
   },
 }
 
@@ -136,14 +186,52 @@ const supaBackend = {
     return out
   },
 
-  async ensureSeed() {
-    const { count, error } = await supabase.from('targets').select('id', { count: 'exact', head: true })
+  // "Initialized" = a settings row exists (our durable marker, which survives
+  // clearing all targets) OR the account already has targets (legacy safety so
+  // we never inject samples on top of real data). Seeding only happens on a
+  // truly brand-new, empty account.
+  async _initialized() {
+    const { data, error } = await supabase.from('settings').select('owner').maybeSingle()
     if (error) throw error
-    if (count && count > 0) return false
-    // Seed only when the account is empty.
+    if (data) return true
+    const { count, error: cErr } = await supabase.from('targets').select('id', { count: 'exact', head: true })
+    if (cErr) throw cErr
+    return (count || 0) > 0
+  },
+
+  async ensureSeed() {
+    if (await this._initialized()) return false
     await supabase.from('targets').insert(buildSeedTargets())
     await supabase.from('templates').insert(buildSeedTemplates())
-    await supaBackend.upsertSettings({ ...DEFAULT_SETTINGS })
+    await this.upsertSettings({ ...DEFAULT_SETTINGS })
+    return true
+  },
+
+  // Delete every data row this user owns (RLS keeps it scoped to them).
+  // Leaves the settings row in place (the "initialized" marker).
+  async _wipeRows() {
+    for (const t of TABLES) {
+      const { error } = await supabase.from(t).delete().neq('id', ZERO_UUID)
+      if (error) throw error
+    }
+  },
+
+  async resetToSample() {
+    await this._wipeRows()
+    await supabase.from('targets').insert(buildSeedTargets())
+    await supabase.from('templates').insert(buildSeedTemplates())
+    await this.upsertSettings({ ...DEFAULT_SETTINGS })
+    purgeLocalCache()
+    return true
+  },
+
+  async wipeAll() {
+    await this._wipeRows()
+    // Recreate the two message templates (app scaffolding) + the settings row
+    // (functional defaults + the "initialized" marker). No sample contacts.
+    await supabase.from('templates').insert(buildSeedTemplates())
+    await this.upsertSettings({ ...DEFAULT_SETTINGS })
+    purgeLocalCache()
     return true
   },
 
@@ -182,12 +270,6 @@ const supaBackend = {
       .single()
     if (error) throw error
     return data
-  },
-
-  async clearAll() {
-    // Deletes every row you own (RLS keeps it scoped to you).
-    for (const t of TABLES) await supabase.from(t).delete().neq('id', '00000000-0000-0000-0000-000000000000')
-    return true
   },
 }
 
