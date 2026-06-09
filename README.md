@@ -114,6 +114,45 @@ If both Supabase vars are blank → the app runs in **localStorage mode** with t
 
 ---
 
+## Cockpit metrics API (`GET /api/cockpit-metrics`)
+
+A read-only JSON endpoint that exposes **aggregate KPIs only** (never any contact's name, email, or messages), for an external dashboard like "Mon Cockpit". It's a Vercel Serverless Function (`api/cockpit-metrics.js`) that reads Supabase server-side with the service-role key.
+
+**Response**
+```json
+{
+  "updatedAt": "2026-06-08T10:00:00Z",
+  "metrics": [
+    { "key": "contacted",     "label": "Personnes contactées", "value": 240, "unit": "",  "trend": 18 },
+    { "key": "response_rate", "label": "Taux de réponse",      "value": 32,  "unit": "%", "trend": 2.4 },
+    { "key": "onboarded",     "label": "Personnes onboardées", "value": 41,  "unit": "",  "trend": 6, "target": 60 }
+  ]
+}
+```
+- `value` = current figure · `trend` = change vs the previous 30-day window · `target` = goal (onboarded only).
+- `response_rate` is computed server-side as `responses ÷ contacted × 100`.
+
+**Server-only env vars** (set in Vercel, **without** the `VITE_` prefix so they never reach the browser):
+
+| Variable | Required? | What it does |
+|---|---|---|
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes (for the API) | Service-role key (Supabase → Settings → API). **Secret — server only.** |
+| `SUPABASE_URL` | Optional | Falls back to `VITE_SUPABASE_URL` if unset. |
+| `COCKPIT_API_TOKEN` | Recommended in prod | When set, callers must send `Authorization: Bearer <token>`. Leave blank for local dev. |
+| `COCKPIT_ALLOWED_ORIGINS` | Optional | Comma-separated CORS allowlist. Default `http://localhost:5174`. |
+| `COCKPIT_ONBOARD_TARGET` | Optional | Goal shown as the onboarded `target`. Default `5`. |
+
+**Calling it from "Mon Cockpit":**
+```js
+const res = await fetch('https://<your-skophos>.vercel.app/api/cockpit-metrics', {
+  headers: { Authorization: `Bearer ${import.meta.env.VITE_COCKPIT_TOKEN}` }, // only if COCKPIT_API_TOKEN is set
+})
+const { metrics } = await res.json()
+```
+CORS is enabled for `COCKPIT_ALLOWED_ORIGINS` (default the cockpit dev server at `:5174`). Locally, run `vercel dev` (the function needs the Node runtime — `npm run dev` serves the SPA only).
+
+---
+
 ## Security notes (read before going public)
 
 - **With Supabase (recommended):** every row is scoped to `owner = auth.uid()` via RLS. Even though the anon key is public, nobody can read or write your data without logging into your account. This is the safe way to deploy publicly.
